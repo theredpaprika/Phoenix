@@ -1,4 +1,4 @@
-"""DataFrame ownership and deeply immutable report provenance metadata."""
+"""DataFrames and immutable provenance, independent of output format."""
 
 from __future__ import annotations
 
@@ -21,22 +21,24 @@ def _utc_now() -> datetime:
 
 @dataclass(frozen=True, slots=True)
 class NamedWindow:
-    """How a DateWindow was used, e.g. 'transaction_date' or 'snapshot_date'."""
+    """A DateWindow and the column or role it applies to."""
 
     name: str
     window: DateWindow
 
     def __post_init__(self) -> None:
-        if not self.name.strip():
+        if not isinstance(self.name, str) or not self.name.strip():
             raise ValueError("NamedWindow.name cannot be empty")
+        if not isinstance(self.window, DateWindow):
+            raise TypeError("NamedWindow.window must be a DateWindow")
 
 
 @dataclass(frozen=True, slots=True)
 class MetadataSet:
-    """Immutable provenance associated with a dataset.
+    """Dataset-level provenance. Export-level fields live in excel.py.
 
-    Dynamic export metadata (export timestamp, export ID and live row count)
-    belongs to the Excel writer, not to this immutable object.
+    This object is immutable, including its collections. The DataFrame is not:
+    its row/column counts are measured when a workbook is exported.
     """
 
     report_name: str
@@ -48,22 +50,18 @@ class MetadataSet:
     sql_sha256: str | None = None
     date_windows: tuple[NamedWindow, ...] = ()
     sql_parameters: tuple[tuple[str, str], ...] = ()
-    parent_export_id: UUID | None = None
     notes: str | None = None
 
     def __post_init__(self) -> None:
-        if not self.report_name.strip():
+        if not isinstance(self.report_name, str) or not self.report_name.strip():
             raise ValueError("MetadataSet.report_name cannot be empty")
         if self.created_at_utc.tzinfo is None or self.created_at_utc.utcoffset() is None:
             raise ValueError("created_at_utc must be timezone-aware")
         if not isinstance(self.dataset_id, UUID):
             raise TypeError("dataset_id must be a UUID")
-        if self.parent_export_id is not None and not isinstance(self.parent_export_id, UUID):
-            raise TypeError("parent_export_id must be a UUID or None")
 
-        # Convert any passed lists/mappings to immutable tuples as well.
         windows = tuple(self.date_windows)
-        if any(not isinstance(window, NamedWindow) for window in windows):
+        if any(not isinstance(item, NamedWindow) for item in windows):
             raise TypeError("date_windows must contain NamedWindow values")
         names = [item.name for item in windows]
         if len(names) != len(set(names)):
@@ -87,7 +85,7 @@ class MetadataSet:
         sql_reference: str | None = None,
         **kwargs: object,
     ) -> MetadataSet:
-        """Hash exactly the SQL text passed in (UTF-8, no normalisation)."""
+        """Record the SHA-256 of the exact UTF-8 SQL text supplied."""
         if not isinstance(sql_text, str):
             raise TypeError("sql_text must be a string")
         return cls(
@@ -100,7 +98,7 @@ class MetadataSet:
 
 @dataclass(slots=True)
 class Dataset:
-    """DataFrame and immutable provenance; takes a defensive copy on creation."""
+    """A private DataFrame copy together with dataset-level provenance."""
 
     dataframe: pd.DataFrame
     metadata: MetadataSet
@@ -123,14 +121,15 @@ class Dataset:
         data_sheet: str = "Data",
         metadata_sheet: str = "Metadata",
         index: bool = False,
+        parent_export_id: UUID | None = None,
     ) -> "ExportReceipt":
-        """Thin convenience wrapper; all export logic lives in excel.py."""
-        from .excel import ExportReceipt, export_dataset
+        """Export one dataset using the same multi-sheet exporter."""
+        from .excel import ExportReceipt, export_workbook
 
-        return export_dataset(
-            self,
+        return export_workbook(
             path,
-            data_sheet=data_sheet,
+            datasets={data_sheet: self},
             metadata_sheet=metadata_sheet,
             index=index,
+            parent_export_id=parent_export_id,
         )
